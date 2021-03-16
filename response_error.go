@@ -1,6 +1,6 @@
 package vk
 
-type apiError struct {
+type ApiError struct {
 	ErrorCode     int    `json:"error_code"`
 	ErrorMsg      string `json:"error_msg"`
 	RequestParams []struct {
@@ -10,5 +10,5 @@ type apiError struct {
 }
 
 type ResponseError struct {
-	Error *apiError `json:"error"`
+	Error *ApiError `json:"error"`
 }
