@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+type Sender interface {
+	Send(ctx context.Context, requests []*Request, concurrency int) <-chan string
+}
+
 type Client struct {
 	*http.Client
 	v           string
