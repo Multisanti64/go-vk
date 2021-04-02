@@ -2,6 +2,7 @@ package vk
 
 import (
 	"context"
+	"encoding/json"
 	"go.uber.org/ratelimit"
 	"math"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 
 type Sender interface {
 	Send(ctx context.Context, requests []*Request, concurrency int) <-chan string
+}
+type MethodSender interface {
+	Method(ctx context.Context, method Requester, accessToken string, response interface{}) (string, error)
 }
 
 type Client struct {
@@ -49,6 +53,16 @@ func (c *Client) Send(ctx context.Context, requests []*Request, concurrency int)
 		workerResponseChannels = append(workerResponseChannels, worker.Run(ctx, requestsChan))
 	}
 	return merge(ctx, workerResponseChannels, maxWorkers)
+}
+
+func (c *Client) Method(ctx context.Context, method Requester, accessToken string, response interface{}) (string, error) {
+	newContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	requests := []*Request{method.ToRequest(accessToken)}
+	responseChan := c.Send(newContext, requests, 1)
+	vkResponseText := <-responseChan
+	err := json.Unmarshal([]byte(vkResponseText), response)
+	return vkResponseText, err
 }
 
 func (c *Client) makeRequestsChan(requests []*Request) <-chan *Request {

@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+type Requester interface {
+	ToRequest(accessToken string) *Request
+}
+
 type Request struct {
 	Method string
 	Params url.Values
