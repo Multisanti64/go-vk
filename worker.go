@@ -20,11 +20,12 @@ func (w *Worker) Run(ctx context.Context, requests <-chan *Request) <-chan strin
 	outChanResponses := make(chan string)
 	go func() {
 		defer close(outChanResponses)
-
+		var lastRawResponse string
 		sendResponse := func(request *Request) func() error {
 			return func() error {
 				w.limiter.Take()
 				rawResponse, _ := w.send(request)
+				lastRawResponse = rawResponse
 				var response ResponseError
 				err := json.Unmarshal([]byte(rawResponse), &response)
 				if err != nil {
@@ -42,7 +43,10 @@ func (w *Worker) Run(ctx context.Context, requests <-chan *Request) <-chan strin
 		case <-ctx.Done():
 			return
 		case request := <-requests:
-			_ = retry.Do(sendResponse(request), retry.Attempts(3), retry.Delay(0), retry.Context(ctx))
+			err := retry.Do(sendResponse(request), retry.Attempts(3), retry.Delay(0), retry.Context(ctx))
+			if err != nil {
+				outChanResponses <- lastRawResponse
+			}
 		}
 	}()
 	return outChanResponses
@@ -64,5 +68,5 @@ func (w *Worker) send(request *Request) (string, error) {
 }
 
 func isTooManyAttempts(response *ResponseError) bool {
-	return response.Error != nil && response.Error.ErrorCode == 6
+	return response.Error != nil && (response.Error.ErrorCode == 6 || response.Error.ErrorCode == 9)
 }
