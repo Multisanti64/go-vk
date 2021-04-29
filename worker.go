@@ -8,6 +8,7 @@ import (
 	"go.uber.org/ratelimit"
 	"io/ioutil"
 	"net/http"
+	"time"
 )
 
 type Worker struct {
@@ -24,14 +25,17 @@ func (w *Worker) Run(ctx context.Context, requests <-chan *Request) <-chan strin
 		sendResponse := func(request *Request) func() error {
 			return func() error {
 				w.limiter.Take()
-				rawResponse, _ := w.send(request)
+				rawResponse, err := w.send(request)
 				lastRawResponse = rawResponse
+				if err != nil {
+					return err
+				}
 				var response ResponseError
-				err := json.Unmarshal([]byte(rawResponse), &response)
+				err = json.Unmarshal([]byte(rawResponse), &response)
 				if err != nil {
 					return nil
 				}
-				if isTooManyAttempts(&response) {
+				if hasRetryErrorCode(&response) {
 					return fmt.Errorf("too many attempts")
 				}
 				outChanResponses <- rawResponse
@@ -43,7 +47,7 @@ func (w *Worker) Run(ctx context.Context, requests <-chan *Request) <-chan strin
 		case <-ctx.Done():
 			return
 		case request := <-requests:
-			err := retry.Do(sendResponse(request), retry.Attempts(3), retry.Delay(0), retry.Context(ctx))
+			err := retry.Do(sendResponse(request), retry.Attempts(3), retry.Delay(1 * time.Second), retry.DelayType(retry.BackOffDelay), retry.Context(ctx))
 			if err != nil {
 				outChanResponses <- lastRawResponse
 			}
@@ -56,8 +60,11 @@ func (w *Worker) send(request *Request) (string, error) {
 	req, _ := http.NewRequest(http.MethodPost, request.getFullUrl(w.baseUrl), request.getParams())
 	resp, err := w.client.Do(req)
 	if err != nil {
-		panic(err)
+		return err.Error(), err
 	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	body, _ := ioutil.ReadAll(resp.Body)
 	result := string(body)
 	err = resp.Body.Close()
@@ -67,6 +74,14 @@ func (w *Worker) send(request *Request) (string, error) {
 	return result, nil
 }
 
-func isTooManyAttempts(response *ResponseError) bool {
-	return response.Error != nil && (response.Error.ErrorCode == 6 || response.Error.ErrorCode == 9)
+func hasRetryErrorCode(response *ResponseError) bool {
+	if response.Error == nil {
+		return false
+	}
+	errorCode := response.Error.ErrorCode
+	switch errorCode {
+	case 6, 9, 10:
+		return true
+	}
+	return false
 }
