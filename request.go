@@ -15,6 +15,11 @@ type Request struct {
 	Params url.Values
 }
 
+func (r *Request) ToRequest(accessToken string) *Request {
+	r.Params.Set("access_token", accessToken)
+	return r
+}
+
 func (r *Request) getFullUrl(base string) string {
 	var stringBuilder strings.Builder
 	stringBuilder.WriteString(base)
