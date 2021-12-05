@@ -1,4 +1,4 @@
-module github.com/Multisanti64/go-vk
+module github.com/Multisanti64/go-vk/v2
 
 go 1.16
 
