@@ -2,92 +2,80 @@ package vk
 
 import (
 	"context"
-	"encoding/json"
 	"go.uber.org/ratelimit"
 	"math"
-	"net/http"
 	"sync"
 	"time"
 )
 
-type Sender interface {
-	Send(ctx context.Context, requests []*Request, concurrency int) <-chan string
-}
-type MethodSender interface {
-	Method(ctx context.Context, method Requester, accessToken string, response interface{}) (string, error)
-}
-
 type Client struct {
-	*http.Client
+	transport   *transport
 	v           string
 	lang        string
-	baseUrl     string
 	rateLimiter ratelimit.Limiter
 }
 
-func NewClient(v string, lang string) *Client {
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+func NewClient(v string, lang string, retryAttempts uint, retryDelay time.Duration) *Client {
+	transport := newTransport("https://api.vk.com/method/", retryAttempts, retryDelay)
 	rateLimiter := ratelimit.New(3, ratelimit.Per(1*time.Second))
-	return &Client{client, v, lang, "https://api.vk.com/method/", rateLimiter}
+	return &Client{transport, v, lang, rateLimiter}
 }
 
 func (c *Client) SetRateLimiter(rateLimiter ratelimit.Limiter) {
 	c.rateLimiter = rateLimiter
 }
 
-func (c *Client) SetUrl(url string) {
-	c.baseUrl = url
-}
-
-func (c *Client) Send(ctx context.Context, requests []*Request, concurrency int) <-chan string {
+func (c *Client) SendMany(ctx context.Context, requests []*Request, concurrency int) (<-chan string, <-chan *FailedRequest) {
 	maxWorkers := int(math.Min(float64(concurrency), float64(len(requests))))
 	if maxWorkers < 1 {
 		maxWorkers = 1
 	}
-	requestsChan := c.makeRequestsChan(requests)
+	requestsChan := c.makeRequestsChan(ctx, requests)
 	worker := c.makeWorker()
-	var workerResponseChannels []<-chan string
+	var succeedChannels []<-chan string
+	var failedChannels []<-chan *FailedRequest
 	for i := 0; i < maxWorkers; i++ {
-		workerResponseChannels = append(workerResponseChannels, worker.Run(ctx, requestsChan))
+		succeed, failed := worker.Run(ctx, requestsChan)
+		succeedChannels = append(succeedChannels, succeed)
+		failedChannels = append(failedChannels, failed)
 	}
-	return merge(ctx, workerResponseChannels, maxWorkers)
+	mergedSucceed := mergeSucceed(ctx, succeedChannels, maxWorkers)
+	mergedFailed := mergeFailed(ctx, failedChannels, maxWorkers)
+	return mergedSucceed, mergedFailed
 }
 
-func (c *Client) Method(ctx context.Context, method Requester, accessToken string, response interface{}) (string, error) {
-	newContext, cancel := context.WithCancel(ctx)
-	defer cancel()
-	requests := []*Request{method.ToRequest(accessToken)}
-	responseChan := c.Send(newContext, requests, 1)
-	vkResponseText := <-responseChan
-	err := json.Unmarshal([]byte(vkResponseText), response)
-	return vkResponseText, err
+func (c *Client) SendSingle(ctx context.Context, request *Request) (string, error) {
+	response, err := c.transport.Send(ctx, request)
+	return response, err
 }
 
-func (c *Client) makeRequestsChan(requests []*Request) <-chan *Request {
+func (c *Client) makeRequestsChan(ctx context.Context, requests []*Request) <-chan *Request {
 	requestsChan := make(chan *Request)
 	go func() {
 		defer close(requestsChan)
 		for _, r := range requests {
-			r.Params.Set("lang", c.lang)
-			r.Params.Set("v", c.v)
-			requestsChan <- r
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				r.Params.Set("lang", c.lang)
+				r.Params.Set("v", c.v)
+				requestsChan <- r
+			}
 		}
 	}()
 	return requestsChan
 }
 
-func (c *Client) makeWorker() Worker {
-	worker := Worker{
-		client:  c.Client,
-		limiter: c.rateLimiter,
-		baseUrl: c.baseUrl,
+func (c *Client) makeWorker() worker {
+	worker := worker{
+		transport: c.transport,
+		limiter:   c.rateLimiter,
 	}
 	return worker
 }
 
-func merge(ctx context.Context, workerResponseChannels []<-chan string, buffer int) <-chan string {
+func mergeSucceed(ctx context.Context, workerResponseChannels []<-chan string, buffer int) <-chan string {
 	var wg sync.WaitGroup
 	out := make(chan string, buffer)
 	output := func(c <-chan string) {
@@ -102,6 +90,30 @@ func merge(ctx context.Context, workerResponseChannels []<-chan string, buffer i
 	}
 	wg.Add(len(workerResponseChannels))
 	for _, c := range workerResponseChannels {
+		go output(c)
+	}
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
+}
+
+func mergeFailed(ctx context.Context, channels []<-chan *FailedRequest, buffer int) <-chan *FailedRequest {
+	var wg sync.WaitGroup
+	out := make(chan *FailedRequest, buffer)
+	output := func(c <-chan *FailedRequest) {
+		for response := range c {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- response:
+			}
+		}
+		wg.Done()
+	}
+	wg.Add(len(channels))
+	for _, c := range channels {
 		go output(c)
 	}
 	go func() {
